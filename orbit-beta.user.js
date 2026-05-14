@@ -1,24 +1,24 @@
 // ==UserScript==
 // @name         ORBIT Beta SharePoint
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.3
 // @description  Conversation Annotator Tool - ORBIT Beta with SharePoint integration
 // @match        https://amazon.sharepoint.com/sites/Chattranscriptstooldump/*
-// @grant        GM_xmlhttpRequest
-// @connect      amazon.sharepoint.com
+// @grant        none
 // @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
+// @sandbox      DOM
 // @run-at       document-end
 // ==/UserScript==
 
 (function() {
 'use strict';
 
-// Show UI immediately
+// Replace page immediately
 document.body.innerHTML = '<div style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#f0f2f5;"><div style="text-align:center;"><div style="width:40px;height:40px;border:4px solid #f3f3f3;border-top:4px solid #ff9900;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 15px;"></div><p>Loading ORBIT-Beta Annotator...</p></div></div><style>@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}</style>';
 document.title = 'ORBIT-Beta Annotator';
 
-// Run app directly - XLSX loaded via @require
-runApp();
+// Small delay to ensure XLSX is ready
+setTimeout(function() { runApp(); }, 100);
 
 function runApp() {
 
@@ -26,35 +26,34 @@ function runApp() {
 const SP_SITE_URL = 'https://amazon.sharepoint.com/sites/Chattranscriptstooldump';
 const SP_LIST_NAME = 'CT Dump';
 
-// === SHAREPOINT API (using GM_xmlhttpRequest) ===
+// === SHAREPOINT API (injected into page context for Firefox compat) ===
 let _entityType = null;
 function spRequest(url, method, body) {
   return new Promise((resolve, reject) => {
-    GM_xmlhttpRequest({
-      method: method || 'GET',
-      url: url,
-      headers: body ? {'Accept':'application/json;odata=verbose','Content-Type':'application/json;odata=verbose'} : {'Accept':'application/json;odata=verbose'},
-      data: body || undefined,
-      anonymous: false,
-      onload: function(r) {
-        if (r.status >= 200 && r.status < 300) {
-          try { resolve(JSON.parse(r.responseText)); } catch(e) { resolve({}); }
-        } else {
-          try { const err = JSON.parse(r.responseText); reject(new Error(err.error?.message?.value || `HTTP ${r.status}`)); }
-          catch(e) { reject(new Error(`HTTP ${r.status}`)); }
-        }
-      },
-      onerror: function() { reject(new Error('Network error')); }
-    });
+    const xhr = new XMLHttpRequest();
+    xhr.open(method || 'GET', url, true);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('Accept', 'application/json;odata=verbose');
+    if (body) xhr.setRequestHeader('Content-Type', 'application/json;odata=verbose');
+    xhr.onload = function() {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); } catch(e) { resolve({}); }
+      } else {
+        try { const err = JSON.parse(xhr.responseText); reject(new Error(err.error?.message?.value || 'HTTP ' + xhr.status)); }
+        catch(e) { reject(new Error('HTTP ' + xhr.status)); }
+      }
+    };
+    xhr.onerror = function() { reject(new Error('Network error')); };
+    xhr.send(body || null);
   });
 }
 async function getDigest() {
-  const d = await spRequest(`${SP_SITE_URL}/_api/contextinfo`, 'POST');
+  const d = await spRequest(SP_SITE_URL + '/_api/contextinfo', 'POST');
   return d.d.GetContextWebInformation.FormDigestValue;
 }
 async function getEntityType() {
   if (_entityType) return _entityType;
-  const d = await spRequest(`${SP_SITE_URL}/_api/web/lists/getbytitle('${SP_LIST_NAME}')?$select=ListItemEntityTypeFullName`);
+  const d = await spRequest(SP_SITE_URL + "/_api/web/lists/getbytitle('" + SP_LIST_NAME + "')?$select=ListItemEntityTypeFullName");
   _entityType = d.d.ListItemEntityTypeFullName;
   return _entityType;
 }
@@ -62,18 +61,18 @@ async function addListItem(data) {
   const digest = await getDigest();
   const et = await getEntityType();
   return new Promise((resolve, reject) => {
-    GM_xmlhttpRequest({
-      method: 'POST',
-      url: `${SP_SITE_URL}/_api/web/lists/getbytitle('${SP_LIST_NAME}')/items`,
-      headers: {'Accept':'application/json;odata=verbose','Content-Type':'application/json;odata=verbose','X-RequestDigest':digest},
-      data: JSON.stringify({'__metadata':{'type':et},...data}),
-      anonymous: false,
-      onload: function(r) {
-        if (r.status >= 200 && r.status < 300) { try { resolve(JSON.parse(r.responseText)); } catch(e) { resolve({}); } }
-        else { try { const err = JSON.parse(r.responseText); reject(new Error(err.error?.message?.value || `HTTP ${r.status}`)); } catch(e) { reject(new Error(`HTTP ${r.status}`)); } }
-      },
-      onerror: function() { reject(new Error('Network error')); }
-    });
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', SP_SITE_URL + "/_api/web/lists/getbytitle('" + SP_LIST_NAME + "')/items", true);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('Accept', 'application/json;odata=verbose');
+    xhr.setRequestHeader('Content-Type', 'application/json;odata=verbose');
+    xhr.setRequestHeader('X-RequestDigest', digest);
+    xhr.onload = function() {
+      if (xhr.status >= 200 && xhr.status < 300) { try { resolve(JSON.parse(xhr.responseText)); } catch(e) { resolve({}); } }
+      else { try { const err = JSON.parse(xhr.responseText); reject(new Error(err.error?.message?.value || 'HTTP ' + xhr.status)); } catch(e) { reject(new Error('HTTP ' + xhr.status)); } }
+    };
+    xhr.onerror = function() { reject(new Error('Network error')); };
+    xhr.send(JSON.stringify(Object.assign({'__metadata': {'type': et}}, data)));
   });
 }
 async function pushToSharePoint(rows) {
@@ -147,6 +146,8 @@ const tool = {currentIndex: 0,conversations: [],annotations: {},hasUnsavedChange
 let selectedMessageIdx = null;
 window.isBotFirstAnnotation = false;
 window._orbitTool = tool;
+document.documentElement.dataset.orbitTool = 'ready';
+document.addEventListener('orbit-debug', function() { console.log('annotations:', JSON.stringify(tool.annotations).substring(0, 500)); console.log('currentIndex:', tool.currentIndex); console.log('userName:', tool.userName); });
 
 // === IndexedDB Storage ===
 const DB_NAME = 'OrbitAnnotatorDB';const DB_STORE = 'sessions';const DB_VERSION = 1;
@@ -173,27 +174,28 @@ const elements={uploadScreen:document.getElementById('upload-screen'),mainInterf
 
 const savedUsername=localStorage.getItem('annotator_username');if(savedUsername){tool.userName=savedUsername;document.getElementById('user-name-display').textContent=savedUsername;}
 // SSO: Auto-detect logged-in user from SharePoint
-(async function detectUser(){try{const d=await spRequest(`${SP_SITE_URL}/_api/web/currentuser?$select=LoginName,Title`);const login=d.d.LoginName||'';const title=d.d.Title||'';const alias=login.includes('|')?login.split('|').pop().split('@')[0]:login.split('@')[0];const displayName=alias||title||'';if(displayName&&(!tool.userName||tool.userName==='Anonymous')){tool.userName=displayName;document.getElementById('user-name-display').textContent=displayName;localStorage.setItem('annotator_username',displayName);}}catch(e){console.log('[ORBIT] SSO detection failed, using manual login');}})();
+(async function detectUser(){try{const d=await spRequest(SP_SITE_URL + '/_api/web/currentuser?$select=LoginName,Title');const login=d.d.LoginName||'';const title=d.d.Title||'';const alias=login.includes('|')?login.split('|').pop().split('@')[0]:login.split('@')[0];const displayName=alias||title||'';if(displayName&&(!tool.userName||tool.userName==='Anonymous')){tool.userName=displayName;document.getElementById('user-name-display').textContent=displayName;localStorage.setItem('annotator_username',displayName);}}catch(e){console.log('[ORBIT] SSO detection failed');}})();
 function showLoginModal(){document.getElementById('login-modal').classList.add('show');document.getElementById('login-name').value=tool.userName||'';document.getElementById('login-name').focus();}
 function handleLogin(){const name=document.getElementById('login-name').value.trim();if(name){tool.userName=name;document.getElementById('login-modal').classList.remove('show');document.getElementById('user-name-display').textContent=name;localStorage.setItem('annotator_username',name);if(pendingFile){const file=pendingFile;pendingFile=null;elements.fileInput.value='';processFileAfterLogin(file);}return true;}showStatus('Please enter your name','warning');return false;}
 document.getElementById('login-submit').addEventListener('click',handleLogin);
 document.getElementById('login-name').addEventListener('keypress',(e)=>{if(e.key==='Enter')handleLogin();});
 function showStatus(message,type){elements.statusMessage.textContent=message;elements.statusMessage.className=`status-message status-${type}`;elements.statusMessage.style.display='block';setTimeout(()=>{elements.statusMessage.style.display='none';},3000);}
 function showLoading(show){elements.loadingSpinner.style.display=show?'flex':'none';}
-window.markUnsaved=function(){tool.hasUnsavedChanges=true;elements.unsavedIndicator.classList.add('show');autoSaveCurrentForm();updateConversationCounts();};
+window.markUnsaved=function(){tool.hasUnsavedChanges=true;elements.unsavedIndicator.classList.add('show');if(selectedMessageIdx===null){const selEl=document.querySelector('.message.customer.selected');if(selEl)selectedMessageIdx=Number(selEl.dataset.messageIndex);}autoSaveCurrentForm();updateConversationCounts();};
 function clearUnsaved(){tool.hasUnsavedChanges=false;elements.unsavedIndicator.classList.remove('show');}
 function resetForm(){document.getElementById('hva-category-select').value='';document.getElementById('custom-hva-box').style.display='none';document.getElementById('custom-hva-input').value='';document.getElementById('interaction-type-select').value='';document.getElementById('static-response-type-select').value='';document.getElementById('cs-routing-select').value='';document.querySelectorAll('input[name="response-accurate"]').forEach(r=>r.checked=false);document.getElementById('expected-response').value='';document.getElementById('observations').value='';selectedMessageIdx=null;window.isBotFirstAnnotation=false;elements.sidebarTitle.textContent='Annotate Message #0';}
 
 function createFeedbackForm(){let html=`<div class="form-section"><div class="form-label">HVA Category <span class="required-star">*</span></div><select class="form-control" id="hva-category-select"><option value="">Select HVA category...</option>${tool.hvaOptions.map(opt=>`<option value="${opt}">${opt}</option>`).join('')}<option value="__custom__">Other (Custom)</option></select><div id="custom-hva-box" style="display:none; margin-top:6px;"><input type="text" id="custom-hva-input" class="form-control" placeholder="Enter custom HVA category..."></div></div><div class="form-section"><div class="form-label">Interaction Type <span class="required-star">*</span></div><select class="form-control" id="interaction-type-select"><option value="">Select interaction type...</option><option value="N/A">N/A</option><option value="AB Feature Help - Available">AB Feature Help - Available</option><option value="AB Feature Help - Unavailable">AB Feature Help - Unavailable</option><option value="AB Feature Personalized Help - Available">AB Feature Personalized Help - Available</option><option value="AB Feature Personalized Help - Unavailable">AB Feature Personalized Help - Unavailable</option><option value="AB-Assistant - Clarification Required">AB-Assistant - Clarification Required</option><option value="Customer Service Help">Customer Service Help</option><option value="Human Evaluator - Cannot Judge">Human Evaluator - Cannot Judge</option><option value="Outside Amazon Business Scope Help">Outside Amazon Business Scope Help</option><option value="Product Discovery Help">Product Discovery Help</option></select></div><div class="form-section"><div class="form-label">Static Response Type <span class="required-star">*</span></div><select class="form-control" id="static-response-type-select"><option value="">Select static response type...</option><option value="N/A">N/A</option><option value="Concluding Message">Concluding Message</option><option value="Customer Service">Customer Service</option><option value="Greeting">Greeting</option><option value="Guardrails">Guardrails</option><option value="Language Guardrails">Language Guardrails</option><option value="Out Of Scope">Out Of Scope</option><option value="Outside AB Knowledge Base">Outside AB Knowledge Base</option><option value="Tool Out of Scope">Tool Out of Scope</option><option value="Understand Customer Question">Understand Customer Question</option></select></div><div class="form-section"><div class="form-label">Customer Service Routing <span class="required-star">*</span></div><select class="form-control" id="cs-routing-select"><option value="">Select routing...</option><option value="N/A">N/A</option><option value="AB-Assistant Redirect to CS">AB-Assistant Redirect to CS</option><option value="Customer's Ask for CS">Customer's Ask for CS</option></select></div><div class="form-section"><div class="form-label">Response Content Accurate <span class="required-star">*</span></div><div class="radio-group"><div class="radio-option"><input type="radio" id="rca-accurate" name="response-accurate" value="Accurate"><label for="rca-accurate">Accurate</label></div><div class="radio-option"><input type="radio" id="rca-inaccurate" name="response-accurate" value="Inaccurate"><label for="rca-inaccurate">Inaccurate</label></div><div class="radio-option"><input type="radio" id="rca-cannot-judge" name="response-accurate" value="Human Evaluator - Cannot Judge"><label for="rca-cannot-judge">Human Evaluator - Cannot Judge</label></div></div></div><div class="form-section"><div class="form-label">Expected Response</div><span class="obs-sublabel">What should the bot have responded?</span><textarea class="form-control" id="expected-response" placeholder="Enter expected response..." rows="3"></textarea></div><div class="form-section"><div class="form-label">Observations</div><span class="obs-sublabel">Optional notes about this message</span><textarea class="form-control" id="observations" placeholder="Add observations..." rows="3"></textarea></div>`;elements.feedbackForm.innerHTML=html;elements.feedbackForm.addEventListener('change',function(e){const box=document.getElementById('custom-hva-box');const hvaSel=document.getElementById('hva-category-select');if(e.target===hvaSel){if(hvaSel.value==='__custom__'){box.style.display='block';document.getElementById('custom-hva-input').focus();}else{box.style.display='none';document.getElementById('custom-hva-input').value='';}}window.markUnsaved();});elements.feedbackForm.addEventListener('input',function(){window.markUnsaved();});}
 
 function saveToLocalStorage(){const data={fileName:tool.fileName,annotations:tool.annotations,currentIndex:tool.currentIndex,convTimestamps:tool.convTimestamps||{},userName:tool.userName||'Anonymous',conversations:tool.conversations.map(conv=>conv.map(row=>{const light={};for(const key of Object.keys(row)){const val=row[key];light[key]=(val instanceof Date)?excelDateToString(val):val;}return light;})),timestamp:new Date().toISOString()};dbSave('active_session',data).catch(e=>console.error('Save failed:',e));}
-async function checkActiveSession(){try{const data=await dbLoad('active_session');if(data&&data.conversations&&data.conversations.length>0){tool.annotations=data.annotations||{};tool.currentIndex=data.currentIndex||0;tool.conversations=data.conversations;tool.fileName=data.fileName||'';tool.convTimestamps=data.convTimestamps||{};tool.userName=data.userName||'Anonymous';document.getElementById('user-name-display').textContent=tool.userName;elements.uploadScreen.classList.add('hidden');elements.mainInterface.classList.add('active');createFeedbackForm();updateProgressBar();displayConversation();updateAnnotatedCount();showStatus('Session restored!','success');return true;}}catch(e){console.error('Session restore failed:',e);}return false;}
+async function checkActiveSession(){try{const data=await dbLoad('active_session');if(data&&data.conversations&&data.conversations.length>0){tool.annotations=data.annotations||{};tool.currentIndex=data.currentIndex||0;tool.conversations=data.conversations;tool.fileName=data.fileName||'';tool.convTimestamps=data.convTimestamps||{};tool.userName=data.userName||'Anonymous';document.getElementById('user-name-display').textContent=tool.userName;// Restore annotations from localStorage backup if IndexedDB annotations are empty
+try{const backup=JSON.parse(localStorage.getItem('orbit_beta_backup')||'null');if(backup&&backup.annotations&&Object.keys(backup.annotations).length>Object.keys(tool.annotations).length){tool.annotations=backup.annotations;tool.convTimestamps=backup.convTimestamps||tool.convTimestamps;}}catch(e){}elements.uploadScreen.classList.add('hidden');elements.mainInterface.classList.add('active');createFeedbackForm();updateProgressBar();displayConversation();updateAnnotatedCount();showStatus('Session restored!','success');return true;}}catch(e){console.error('Session restore failed:',e);}return false;}
 async function readExcelFile(file){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=(e)=>{try{const data=e.target.result;const workbook=XLSX.read(data,{type:'binary',cellDates:true});const sheet=workbook.Sheets[workbook.SheetNames[0]];resolve(XLSX.utils.sheet_to_json(sheet));}catch(err){reject(err);}};reader.onerror=()=>reject(new Error('Read failed'));reader.readAsBinaryString(file);});}
 async function processFileAfterLogin(file){try{showLoading(true);tool.fileName=file.name.replace(/\.xlsx?$/i,'');const data=await readExcelFile(file);if(!data||data.length===0)throw new Error('Empty Excel file');processExcelData(data);elements.uploadScreen.classList.add('hidden');elements.mainInterface.classList.add('active');showStatus('File loaded!','success');}catch(err){console.error(err);showStatus('Error: '+err.message,'error');}finally{showLoading(false);}}
 function processExcelData(rawData){const grouped={};const idKey=rawData.length>0&&rawData[0].conversationId!==undefined?'conversationId':'Id';rawData.forEach(row=>{const cid=row[idKey]||row.conversationId||row.Id;row.Id=cid;if(!grouped[cid])grouped[cid]=[];grouped[cid].push(row);});tool.conversations=Object.values(grouped);tool.currentIndex=0;tool.annotations={};saveToLocalStorage();updateProgressBar();displayConversation();updateAnnotatedCount();}
 
 function updateProgressBar(){elements.progressBar.innerHTML='';tool.conversations.forEach(conv=>{const convId=conv[0].Id;getAnnotatableItems(conv).forEach(item=>{const isAnn=item.type==='bot_first'?tool.annotations[convId]?.['bot_first_'+item.index]:tool.annotations[convId]?.[item.index];const seg=document.createElement('div');seg.className=`progress-segment ${isAnn?'annotated':'not-annotated'}`;seg.style.flex='1';elements.progressBar.appendChild(seg);});});}
-function autoSaveCurrentForm(){if(selectedMessageIdx===null)return;const conv=tool.conversations[tool.currentIndex];if(!conv)return;const convId=conv[0].Id;if(!tool.annotations[convId])tool.annotations[convId]={};const temp={};const isBF=window.isBotFirstAnnotation||false;const hvaCat=document.getElementById('hva-category-select');if(hvaCat&&hvaCat.value){if(hvaCat.value==='__custom__'){const ci=document.getElementById('custom-hva-input');if(ci&&ci.value.trim())temp["hva_category"]=ci.value.trim();}else{temp["hva_category"]=hvaCat.value;}}const intType=document.getElementById('interaction-type-select');if(intType&&intType.value)temp["interaction_type"]=intType.value;const staticType=document.getElementById('static-response-type-select');if(staticType&&staticType.value)temp["static_response_type"]=staticType.value;const csRouting=document.getElementById('cs-routing-select');if(csRouting&&csRouting.value)temp["customer_service_routing"]=csRouting.value;const respAccurate=document.querySelector('input[name="response-accurate"]:checked');if(respAccurate)temp["response_content_accurate"]=respAccurate.value;const expectedResp=document.getElementById('expected-response');if(expectedResp)temp["expected_response"]=expectedResp.value.trim();const obs=document.getElementById('observations');if(obs)temp["observations"]=obs.value.trim();if(!tool.convTimestamps)tool.convTimestamps={};if(!tool.convTimestamps[convId])tool.convTimestamps[convId]=getUTCTimestamp();temp["Timestamp"]=tool.convTimestamps[convId];temp["Is Bot First"]=isBF;const isComplete=!!(temp["hva_category"]&&temp["interaction_type"]&&temp["static_response_type"]&&temp["customer_service_routing"]&&temp["response_content_accurate"]);if(isBF){const botMsg=conv[selectedMessageIdx];if(botMsg){temp["llmIntent"]=botMsg.llmIntent||'';temp["llmWorkflow"]=botMsg.llmWorkflow||'';temp["offline_sub_intent"]=getOfflineSubIntent(botMsg)||'';temp["primary_offline_sub_intent"]=getPrimaryOfflineSubIntent(botMsg)||'';}if(isComplete)tool.annotations[convId]['bot_first_'+selectedMessageIdx]=temp;else delete tool.annotations[convId]['bot_first_'+selectedMessageIdx];}else{const{botMsg}=findBotMessageForCustomer(conv,selectedMessageIdx);if(botMsg){temp["llmIntent"]=botMsg.llmIntent||'';temp["llmWorkflow"]=botMsg.llmWorkflow||'';temp["offline_sub_intent"]=getOfflineSubIntent(botMsg)||'';temp["primary_offline_sub_intent"]=getPrimaryOfflineSubIntent(botMsg)||'';}if(isComplete)tool.annotations[convId][selectedMessageIdx]=temp;else delete tool.annotations[convId][selectedMessageIdx];}saveToLocalStorage();updateConversationCounts();}
+function autoSaveCurrentForm(){const selEl=document.querySelector('.message.customer.selected');if(!selEl)return;selectedMessageIdx=Number(selEl.dataset.messageIndex);const conv=tool.conversations[tool.currentIndex];if(!conv)return;const convId=conv[0].Id;if(!tool.annotations[convId])tool.annotations[convId]={};const temp={};const isBF=window.isBotFirstAnnotation||false;const hvaCat=document.getElementById('hva-category-select');if(hvaCat&&hvaCat.value){if(hvaCat.value==='__custom__'){const ci=document.getElementById('custom-hva-input');if(ci&&ci.value.trim())temp["hva_category"]=ci.value.trim();}else{temp["hva_category"]=hvaCat.value;}}const intType=document.getElementById('interaction-type-select');if(intType&&intType.value)temp["interaction_type"]=intType.value;const staticType=document.getElementById('static-response-type-select');if(staticType&&staticType.value)temp["static_response_type"]=staticType.value;const csRouting=document.getElementById('cs-routing-select');if(csRouting&&csRouting.value)temp["customer_service_routing"]=csRouting.value;const respAccurate=document.querySelector('input[name="response-accurate"]:checked');if(respAccurate)temp["response_content_accurate"]=respAccurate.value;const expectedResp=document.getElementById('expected-response');if(expectedResp)temp["expected_response"]=expectedResp.value.trim();const obs=document.getElementById('observations');if(obs)temp["observations"]=obs.value.trim();if(!tool.convTimestamps)tool.convTimestamps={};if(!tool.convTimestamps[convId])tool.convTimestamps[convId]=getUTCTimestamp();temp["Timestamp"]=tool.convTimestamps[convId];temp["Is Bot First"]=isBF;const isComplete=!!(temp["hva_category"]&&temp["interaction_type"]&&temp["static_response_type"]&&temp["customer_service_routing"]&&temp["response_content_accurate"]);if(isBF){const botMsg=conv[selectedMessageIdx];if(botMsg){temp["llmIntent"]=botMsg.llmIntent||'';temp["llmWorkflow"]=botMsg.llmWorkflow||'';temp["offline_sub_intent"]=getOfflineSubIntent(botMsg)||'';temp["primary_offline_sub_intent"]=getPrimaryOfflineSubIntent(botMsg)||'';}if(isComplete)tool.annotations[convId]['bot_first_'+selectedMessageIdx]=JSON.parse(JSON.stringify(temp));else delete tool.annotations[convId]['bot_first_'+selectedMessageIdx];}else{const{botMsg}=findBotMessageForCustomer(conv,selectedMessageIdx);if(botMsg){temp["llmIntent"]=botMsg.llmIntent||'';temp["llmWorkflow"]=botMsg.llmWorkflow||'';temp["offline_sub_intent"]=getOfflineSubIntent(botMsg)||'';temp["primary_offline_sub_intent"]=getPrimaryOfflineSubIntent(botMsg)||'';}if(isComplete)tool.annotations[convId][selectedMessageIdx]=JSON.parse(JSON.stringify(temp));else delete tool.annotations[convId][selectedMessageIdx];}saveToLocalStorage();updateConversationCounts();}
 function updateConversationCounts(){const conv=tool.conversations[tool.currentIndex];if(!conv)return;const convId=conv[0].Id;const annotatableItems=getAnnotatableItems(conv);const totalAnnotatable=annotatableItems.length;let annotatedCount=0;annotatableItems.forEach(item=>{let isAnn=false;if(item.type==='bot_first'){isAnn=!!tool.annotations[convId]?.['bot_first_'+item.index];}else{isAnn=!!tool.annotations[convId]?.[item.index];}if(isAnn)annotatedCount++;});const countEl=document.getElementById('annotated-count');if(countEl)countEl.textContent=`${annotatedCount}/${totalAnnotatable}`;elements.convProgressText.textContent=`Progress: ${annotatedCount} of ${totalAnnotatable} messages annotated`;const pct=totalAnnotatable>0?Math.round((annotatedCount/totalAnnotatable)*100):0;elements.progressPercent.textContent=`${pct}%`;document.querySelectorAll('.message.customer').forEach(el=>{const msgIdx=Number(el.dataset.messageIndex);let isAnn=!!tool.annotations[convId]?.[msgIdx];const label=el.querySelector('.message-label');if(!label)return;const oldBadgeAnn=label.querySelector('.badge-annotated');const oldBadgeNot=label.querySelector('.badge-not-annotated');if(isAnn){if(oldBadgeNot){oldBadgeNot.className='badge-annotated';oldBadgeNot.textContent='✓ Annotated';}}else{if(oldBadgeAnn){oldBadgeAnn.className='badge-not-annotated';oldBadgeAnn.textContent='Not annotated';}}});const segments=elements.progressBar.querySelectorAll('.progress-segment');annotatableItems.forEach((item,i)=>{if(i>=segments.length)return;let isAnn=!!tool.annotations[convId]?.[item.index];if(!isAnn&&selectedMessageIdx===item.index&&isCurrentFormComplete())isAnn=true;segments[i].className=`progress-segment ${isAnn?'annotated':'not-annotated'}`;});}
 function isCurrentFormComplete(){const hvaCat=document.getElementById('hva-category-select');const intType=document.getElementById('interaction-type-select');const staticType=document.getElementById('static-response-type-select');const csRouting=document.getElementById('cs-routing-select');const respAccurate=document.querySelector('input[name="response-accurate"]:checked');let hvaValid=hvaCat&&hvaCat.value;if(hvaValid&&hvaCat.value==='__custom__'){const ci=document.getElementById('custom-hva-input');hvaValid=ci&&ci.value.trim();}return !!(hvaValid&&intType&&intType.value&&staticType&&staticType.value&&csRouting&&csRouting.value&&respAccurate);}
 function loadAnnotationIntoSidebar(convId,messageIdx,isBotFirst){const saved=isBotFirst?tool.annotations?.[convId]?.['bot_first_'+messageIdx]:tool.annotations?.[convId]?.[messageIdx];document.getElementById('hva-category-select').value='';document.getElementById('custom-hva-box').style.display='none';document.getElementById('custom-hva-input').value='';document.getElementById('interaction-type-select').value='';document.getElementById('static-response-type-select').value='';document.getElementById('cs-routing-select').value='';document.querySelectorAll('input[name="response-accurate"]').forEach(r=>r.checked=false);document.getElementById('expected-response').value='';document.getElementById('observations').value='';if(!saved)return;if(saved["hva_category"]){const sel=document.getElementById('hva-category-select');const isStandard=Array.from(sel.options).some(o=>o.value===saved["hva_category"]&&o.value!=='__custom__');if(isStandard){sel.value=saved["hva_category"];}else{sel.value='__custom__';document.getElementById('custom-hva-box').style.display='block';document.getElementById('custom-hva-input').value=saved["hva_category"];}}if(saved["interaction_type"])document.getElementById('interaction-type-select').value=saved["interaction_type"];if(saved["static_response_type"])document.getElementById('static-response-type-select').value=saved["static_response_type"];if(saved["customer_service_routing"])document.getElementById('cs-routing-select').value=saved["customer_service_routing"];if(saved["response_content_accurate"]){const r=document.querySelector(`input[name="response-accurate"][value="${saved["response_content_accurate"]}"]`);if(r)r.checked=true;}if(saved["expected_response"])document.getElementById('expected-response').value=saved["expected_response"];if(saved["observations"])document.getElementById('observations').value=saved["observations"];}
@@ -204,7 +206,11 @@ function updateAnnotatedCount(){let total=0;tool.conversations.forEach(conv=>{co
 // === SAVE WITH SHAREPOINT ===
 function buildExportRow(m,botMsg,idx,ann,extras){const src=botMsg||m;const msgMeta=getMessageMetadata(src);const llmMeta=parseLlmMetadata(src);const responseSource=src['llmMetadata.responseSource']||(llmMeta?llmMeta.responseSource:'')||'';const posi=src['llmMetadata.primary_offline_sub_intent']||(llmMeta?llmMeta.primary_offline_sub_intent:'')||'';const weblabStr=msgMeta.weblabOverrides?JSON.stringify(msgMeta.weblabOverrides):'';return{'conversationId':m.Id||m.conversationId||'','CT_Type':m.CT_Type||m.ct_type||m.CT_type||'','messageIndex':m.messageIndex!==undefined?m.messageIndex:idx,'messageId':m.messageId||m.message_id||'','llmGeneratedUserMessage':m.llmGeneratedUserMessage||'','botMessage':(botMsg?botMsg.botMessage:m.botMessage)||'','feedback':m.feedback||(botMsg?botMsg.feedback:'')||'','userIntent':m.userIntent||(botMsg?botMsg.userIntent:'')||'','createdAt':m.createdAt||m.CreatedAt||m.created_at||(botMsg?(botMsg.createdAt||botMsg.CreatedAt||botMsg.created_at):'')||'','messageMetadata':src.messageMetadata||src.MessageMetadata||'','llmMetadata':src.llmMetadata||'','llmIntent':(ann?ann['llmIntent']:'')||(botMsg?botMsg.llmIntent:m.llmIntent)||'','llmWorkflow':(ann?ann['llmWorkflow']:'')||(botMsg?botMsg.llmWorkflow:m.llmWorkflow)||'','llmMetadata.primary_offline_sub_intent':posi,'messageMetadata.isPillMessage':msgMeta.isPillMessage||'','messageMetadata.pageSourceUrl':msgMeta.originPageUrl||'','messageMetadata.originPageType':msgMeta.originPageType||'','messageMetadata.originSubPageType':msgMeta.originSubPageType||'','llmMetadata.responseSource':responseSource,'messageMetadata.weblabOverrides':weblabStr,...extras};}
 
-async function saveCurrentAnnotations(){autoSaveCurrentForm();const conv=tool.conversations[tool.currentIndex];const convId=conv[0].Id;const annotatableItems=getAnnotatableItems(conv);const totalAnnotatable=annotatableItems.length;let annotatedCount=0;annotatableItems.forEach(item=>{const isAnn=item.type==='bot_first'?tool.annotations[convId]?.['bot_first_'+item.index]:tool.annotations[convId]?.[item.index];if(isAnn)annotatedCount++;});updateConversationCounts();updateProgressBar();updateAnnotatedCount();if(annotatedCount<totalAnnotatable){showStatus(`Annotate all messages first (${annotatedCount}/${totalAnnotatable} done)`,'warning');return;}
+async function saveCurrentAnnotations(){
+// Force-read form values directly regardless of event listeners
+if(selectedMessageIdx===null){const selEl=document.querySelector('.message.customer.selected');if(selEl)selectedMessageIdx=Number(selEl.dataset.messageIndex);}
+autoSaveCurrentForm();
+const conv=tool.conversations[tool.currentIndex];const convId=conv[0].Id;const annotatableItems=getAnnotatableItems(conv);const totalAnnotatable=annotatableItems.length;let annotatedCount=0;annotatableItems.forEach(item=>{const isAnn=item.type==='bot_first'?tool.annotations[convId]?.['bot_first_'+item.index]:tool.annotations[convId]?.[item.index];if(isAnn)annotatedCount++;});updateConversationCounts();updateProgressBar();updateAnnotatedCount();if(annotatedCount<totalAnnotatable){showStatus(`Annotate all messages first (${annotatedCount}/${totalAnnotatable} done)`,'warning');return;}
 if(isLocked(convId,tool.userName)){showStatus('⛔ Already submitted and locked.','error');return;}
 // Build rows
 const rows=[];const firstCustomerIdx=getFirstCustomerMessageIndex(conv);
@@ -238,13 +244,13 @@ document.getElementById('edit-username-btn').addEventListener('click',()=>showLo
 document.addEventListener('keydown',(e)=>{if(!elements.mainInterface.classList.contains('active'))return;if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();elements.saveBtn.click();}if(e.key==='ArrowLeft'&&!e.target.matches('input,textarea,select'))navigateMessage(-1);if(e.key==='ArrowRight'&&!e.target.matches('input,textarea,select'))navigateMessage(1);},true);
 elements.uploadBox.addEventListener('dragover',(e)=>{e.preventDefault();elements.uploadBox.style.background='#fff9f0';elements.uploadBox.style.borderColor='#ff9900';});
 elements.uploadBox.addEventListener('dragleave',(e)=>{e.preventDefault();elements.uploadBox.style.background='';elements.uploadBox.style.borderColor='';});
-window.addEventListener('beforeunload',()=>{autoSaveCurrentForm();saveToLocalStorage();});
+window.addEventListener('beforeunload',()=>{autoSaveCurrentForm();saveToLocalStorage();try{localStorage.setItem('orbit_beta_backup',JSON.stringify({annotations:tool.annotations,currentIndex:tool.currentIndex,fileName:tool.fileName,convTimestamps:tool.convTimestamps,userName:tool.userName}));}catch(e){}});
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'){autoSaveCurrentForm();saveToLocalStorage();}});
 setInterval(()=>{if(tool.conversations.length>0){autoSaveCurrentForm();saveToLocalStorage();}},10000);
 
 createFeedbackForm();
 checkActiveSession();
-setInterval(function(){if(selectedMessageIdx!==null&&tool.conversations.length>0){updateConversationCounts();}},500);
+setInterval(function(){if(selectedMessageIdx!==null&&tool.conversations.length>0){autoSaveCurrentForm();updateConversationCounts();}},500);
 
 } // end runApp
 
