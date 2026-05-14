@@ -11,26 +11,27 @@
 (function() {
 'use strict';
 
-// Inject entire app as a page-level script to avoid Firefox Tampermonkey sandbox
+// Show loading immediately while XLSX loads
+document.body.innerHTML = '<div style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#f0f2f5;"><div style="text-align:center;"><div style="width:40px;height:40px;border:4px solid #f3f3f3;border-top:4px solid #ff9900;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 15px;"></div><p>Loading ORBIT-Beta Annotator...</p></div></div><style>@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}</style>';
+document.title = 'ORBIT-Beta Annotator';
+
+// Load XLSX then run app
 function bootApp() {
-  // Load XLSX first
   const xlsxScript = document.createElement('script');
   xlsxScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
   xlsxScript.onload = function() { runApp(); };
   xlsxScript.onerror = function() {
-    // If CSP blocks it, try fetching via XHR and injecting as inline
+    // CSP blocked script tag, try XHR fallback
     const xhr = new XMLHttpRequest();
     xhr.open('GET', 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
     xhr.withCredentials = false;
     xhr.onload = function() {
       if (xhr.status === 200) {
-        const s = document.createElement('script');
-        s.textContent = xhr.responseText;
-        document.head.appendChild(s);
-        runApp();
-      } else { alert('Failed to load XLSX library'); }
+        try { (new Function(xhr.responseText))(); runApp(); }
+        catch(e) { document.body.innerHTML = '<h2 style="padding:40px;color:red;">Failed to load XLSX library. Try Chrome or disable CSP.</h2>'; }
+      } else { document.body.innerHTML = '<h2 style="padding:40px;color:red;">Failed to load XLSX library (HTTP ' + xhr.status + ')</h2>'; }
     };
-    xhr.onerror = function() { alert('Failed to load XLSX library - network error'); };
+    xhr.onerror = function() { document.body.innerHTML = '<h2 style="padding:40px;color:red;">Failed to load XLSX - network error</h2>'; };
     xhr.send();
   };
   document.head.appendChild(xlsxScript);
