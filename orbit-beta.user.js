@@ -6,6 +6,7 @@
 // @match        https://amazon.sharepoint.com/sites/Chattranscriptstooldump/*
 // @grant        none
 // @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
+// @sandbox      DOM
 // @run-at       document-end
 // ==/UserScript==
 
