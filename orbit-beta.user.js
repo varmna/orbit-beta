@@ -4,44 +4,21 @@
 // @version      2.0
 // @description  Conversation Annotator Tool - ORBIT Beta with SharePoint integration
 // @match        https://amazon.sharepoint.com/sites/Chattranscriptstooldump/*
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @connect      amazon.sharepoint.com
+// @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
 // @run-at       document-end
 // ==/UserScript==
 
 (function() {
 'use strict';
 
-// Show loading immediately while XLSX loads
-function replaceBody() {
-  document.body.innerHTML = '<div style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#f0f2f5;"><div style="text-align:center;"><div style="width:40px;height:40px;border:4px solid #f3f3f3;border-top:4px solid #ff9900;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 15px;"></div><p>Loading ORBIT-Beta Annotator...</p></div></div><style>@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}</style>';
-  document.title = 'ORBIT-Beta Annotator';
-  // Stop SharePoint scripts from overwriting
-  window.stop();
-}
-if (document.body) { replaceBody(); }
-else { document.addEventListener('DOMContentLoaded', replaceBody); }
+// Show UI immediately
+document.body.innerHTML = '<div style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#f0f2f5;"><div style="text-align:center;"><div style="width:40px;height:40px;border:4px solid #f3f3f3;border-top:4px solid #ff9900;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 15px;"></div><p>Loading ORBIT-Beta Annotator...</p></div></div><style>@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}</style>';
+document.title = 'ORBIT-Beta Annotator';
 
-// Load XLSX then run app
-function bootApp() {
-  const xlsxScript = document.createElement('script');
-  xlsxScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
-  xlsxScript.onload = function() { runApp(); };
-  xlsxScript.onerror = function() {
-    // CSP blocked script tag, try XHR fallback
-    const xhr = new XMLHttpRequest();
-    xhr.open('GET', 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
-    xhr.withCredentials = false;
-    xhr.onload = function() {
-      if (xhr.status === 200) {
-        try { (new Function(xhr.responseText))(); runApp(); }
-        catch(e) { document.body.innerHTML = '<h2 style="padding:40px;color:red;">Failed to load XLSX library. Try Chrome or disable CSP.</h2>'; }
-      } else { document.body.innerHTML = '<h2 style="padding:40px;color:red;">Failed to load XLSX library (HTTP ' + xhr.status + ')</h2>'; }
-    };
-    xhr.onerror = function() { document.body.innerHTML = '<h2 style="padding:40px;color:red;">Failed to load XLSX - network error</h2>'; };
-    xhr.send();
-  };
-  document.head.appendChild(xlsxScript);
-}
+// Run app directly - XLSX loaded via @require
+runApp();
 
 function runApp() {
 
@@ -49,26 +26,26 @@ function runApp() {
 const SP_SITE_URL = 'https://amazon.sharepoint.com/sites/Chattranscriptstooldump';
 const SP_LIST_NAME = 'CT Dump';
 
-// === SHAREPOINT API ===
+// === SHAREPOINT API (using GM_xmlhttpRequest) ===
 let _entityType = null;
 function spRequest(url, method, body) {
   return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open(method || 'GET', url, true);
-    xhr.withCredentials = true;
-    xhr.setRequestHeader('Accept', 'application/json;odata=verbose');
-    if (body) xhr.setRequestHeader('Content-Type', 'application/json;odata=verbose');
-    xhr.onload = function() {
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try { resolve(JSON.parse(xhr.responseText)); } catch(e) { resolve({}); }
-      } else {
-        try { const err = JSON.parse(xhr.responseText); reject(new Error(err.error?.message?.value || `HTTP ${xhr.status}`)); }
-        catch(e) { reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText.substring(0,100)}`)); }
-      }
-    };
-    xhr.onerror = function() { reject(new Error('Network error')); };
-    if (body) xhr.send(typeof body === 'string' ? body : JSON.stringify(body));
-    else xhr.send();
+    GM_xmlhttpRequest({
+      method: method || 'GET',
+      url: url,
+      headers: body ? {'Accept':'application/json;odata=verbose','Content-Type':'application/json;odata=verbose'} : {'Accept':'application/json;odata=verbose'},
+      data: body || undefined,
+      anonymous: false,
+      onload: function(r) {
+        if (r.status >= 200 && r.status < 300) {
+          try { resolve(JSON.parse(r.responseText)); } catch(e) { resolve({}); }
+        } else {
+          try { const err = JSON.parse(r.responseText); reject(new Error(err.error?.message?.value || `HTTP ${r.status}`)); }
+          catch(e) { reject(new Error(`HTTP ${r.status}`)); }
+        }
+      },
+      onerror: function() { reject(new Error('Network error')); }
+    });
   });
 }
 async function getDigest() {
@@ -85,18 +62,18 @@ async function addListItem(data) {
   const digest = await getDigest();
   const et = await getEntityType();
   return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${SP_SITE_URL}/_api/web/lists/getbytitle('${SP_LIST_NAME}')/items`, true);
-    xhr.withCredentials = true;
-    xhr.setRequestHeader('Accept', 'application/json;odata=verbose');
-    xhr.setRequestHeader('Content-Type', 'application/json;odata=verbose');
-    xhr.setRequestHeader('X-RequestDigest', digest);
-    xhr.onload = function() {
-      if (xhr.status >= 200 && xhr.status < 300) { try { resolve(JSON.parse(xhr.responseText)); } catch(e) { resolve({}); } }
-      else { try { const err = JSON.parse(xhr.responseText); reject(new Error(err.error?.message?.value || `HTTP ${xhr.status}`)); } catch(e) { reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText.substring(0,100)}`)); } }
-    };
-    xhr.onerror = function() { reject(new Error('Network error')); };
-    xhr.send(JSON.stringify({ '__metadata': { 'type': et }, ...data }));
+    GM_xmlhttpRequest({
+      method: 'POST',
+      url: `${SP_SITE_URL}/_api/web/lists/getbytitle('${SP_LIST_NAME}')/items`,
+      headers: {'Accept':'application/json;odata=verbose','Content-Type':'application/json;odata=verbose','X-RequestDigest':digest},
+      data: JSON.stringify({'__metadata':{'type':et},...data}),
+      anonymous: false,
+      onload: function(r) {
+        if (r.status >= 200 && r.status < 300) { try { resolve(JSON.parse(r.responseText)); } catch(e) { resolve({}); } }
+        else { try { const err = JSON.parse(r.responseText); reject(new Error(err.error?.message?.value || `HTTP ${r.status}`)); } catch(e) { reject(new Error(`HTTP ${r.status}`)); } }
+      },
+      onerror: function() { reject(new Error('Network error')); }
+    });
   });
 }
 async function pushToSharePoint(rows) {
@@ -270,7 +247,5 @@ checkActiveSession();
 setInterval(function(){if(selectedMessageIdx!==null&&tool.conversations.length>0){updateConversationCounts();}},500);
 
 } // end runApp
-
-bootApp();
 
 })();
