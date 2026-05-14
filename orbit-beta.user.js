@@ -5,13 +5,38 @@
 // @description  Conversation Annotator Tool - ORBIT Beta with SharePoint integration
 // @match        https://amazon.sharepoint.com/sites/Chattranscriptstooldump/*
 // @grant        none
-// @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
-// @sandbox      DOM
 // @run-at       document-end
 // ==/UserScript==
 
 (function() {
 'use strict';
+
+// Inject entire app as a page-level script to avoid Firefox Tampermonkey sandbox
+function bootApp() {
+  // Load XLSX first
+  const xlsxScript = document.createElement('script');
+  xlsxScript.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+  xlsxScript.onload = function() { runApp(); };
+  xlsxScript.onerror = function() {
+    // If CSP blocks it, try fetching via XHR and injecting as inline
+    const xhr = new XMLHttpRequest();
+    xhr.open('GET', 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js');
+    xhr.withCredentials = false;
+    xhr.onload = function() {
+      if (xhr.status === 200) {
+        const s = document.createElement('script');
+        s.textContent = xhr.responseText;
+        document.head.appendChild(s);
+        runApp();
+      } else { alert('Failed to load XLSX library'); }
+    };
+    xhr.onerror = function() { alert('Failed to load XLSX library - network error'); };
+    xhr.send();
+  };
+  document.head.appendChild(xlsxScript);
+}
+
+function runApp() {
 
 // === SHAREPOINT CONFIG ===
 const SP_SITE_URL = 'https://amazon.sharepoint.com/sites/Chattranscriptstooldump';
@@ -19,28 +44,53 @@ const SP_LIST_NAME = 'CT Dump';
 
 // === SHAREPOINT API ===
 let _entityType = null;
+function spRequest(url, method, body) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(method || 'GET', url, true);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('Accept', 'application/json;odata=verbose');
+    if (body) xhr.setRequestHeader('Content-Type', 'application/json;odata=verbose');
+    xhr.onload = function() {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); } catch(e) { resolve({}); }
+      } else {
+        try { const err = JSON.parse(xhr.responseText); reject(new Error(err.error?.message?.value || `HTTP ${xhr.status}`)); }
+        catch(e) { reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText.substring(0,100)}`)); }
+      }
+    };
+    xhr.onerror = function() { reject(new Error('Network error')); };
+    if (body) xhr.send(typeof body === 'string' ? body : JSON.stringify(body));
+    else xhr.send();
+  });
+}
 async function getDigest() {
-  const r = await fetch(`${SP_SITE_URL}/_api/contextinfo`, { method: 'POST', headers: { 'Accept': 'application/json;odata=verbose' } });
-  const d = await r.json();
+  const d = await spRequest(`${SP_SITE_URL}/_api/contextinfo`, 'POST');
   return d.d.GetContextWebInformation.FormDigestValue;
 }
 async function getEntityType() {
   if (_entityType) return _entityType;
-  const r = await fetch(`${SP_SITE_URL}/_api/web/lists/getbytitle('${SP_LIST_NAME}')?$select=ListItemEntityTypeFullName`, { headers: { 'Accept': 'application/json;odata=verbose' } });
-  const d = await r.json();
+  const d = await spRequest(`${SP_SITE_URL}/_api/web/lists/getbytitle('${SP_LIST_NAME}')?$select=ListItemEntityTypeFullName`);
   _entityType = d.d.ListItemEntityTypeFullName;
   return _entityType;
 }
 async function addListItem(data) {
   const digest = await getDigest();
   const et = await getEntityType();
-  const r = await fetch(`${SP_SITE_URL}/_api/web/lists/getbytitle('${SP_LIST_NAME}')/items`, {
-    method: 'POST',
-    headers: { 'Accept': 'application/json;odata=verbose', 'Content-Type': 'application/json;odata=verbose', 'X-RequestDigest': digest },
-    body: JSON.stringify({ '__metadata': { 'type': et }, ...data })
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${SP_SITE_URL}/_api/web/lists/getbytitle('${SP_LIST_NAME}')/items`, true);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('Accept', 'application/json;odata=verbose');
+    xhr.setRequestHeader('Content-Type', 'application/json;odata=verbose');
+    xhr.setRequestHeader('X-RequestDigest', digest);
+    xhr.onload = function() {
+      if (xhr.status >= 200 && xhr.status < 300) { try { resolve(JSON.parse(xhr.responseText)); } catch(e) { resolve({}); } }
+      else { try { const err = JSON.parse(xhr.responseText); reject(new Error(err.error?.message?.value || `HTTP ${xhr.status}`)); } catch(e) { reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText.substring(0,100)}`)); } }
+    };
+    xhr.onerror = function() { reject(new Error('Network error')); };
+    xhr.send(JSON.stringify({ '__metadata': { 'type': et }, ...data }));
   });
-  if (!r.ok) { const e = await r.json(); throw new Error(e.error?.message?.value || `HTTP ${r.status}`); }
-  return r.json();
 }
 async function pushToSharePoint(rows) {
   let s = 0, f = 0;
@@ -142,7 +192,7 @@ const elements={uploadScreen:document.getElementById('upload-screen'),mainInterf
 
 const savedUsername=localStorage.getItem('annotator_username');if(savedUsername){tool.userName=savedUsername;document.getElementById('user-name-display').textContent=savedUsername;}
 // SSO: Auto-detect logged-in user from SharePoint
-(async function detectUser(){try{const r=await fetch(`${SP_SITE_URL}/_api/web/currentuser?$select=LoginName,Title`,{headers:{'Accept':'application/json;odata=verbose'}});if(r.ok){const d=await r.json();const login=d.d.LoginName||'';const title=d.d.Title||'';const alias=login.includes('|')?login.split('|').pop().split('@')[0]:login.split('@')[0];const displayName=alias||title||'';if(displayName&&(!tool.userName||tool.userName==='Anonymous')){tool.userName=displayName;document.getElementById('user-name-display').textContent=displayName;localStorage.setItem('annotator_username',displayName);}}}catch(e){console.log('[ORBIT] SSO detection failed, using manual login');}})();
+(async function detectUser(){try{const d=await spRequest(`${SP_SITE_URL}/_api/web/currentuser?$select=LoginName,Title`);const login=d.d.LoginName||'';const title=d.d.Title||'';const alias=login.includes('|')?login.split('|').pop().split('@')[0]:login.split('@')[0];const displayName=alias||title||'';if(displayName&&(!tool.userName||tool.userName==='Anonymous')){tool.userName=displayName;document.getElementById('user-name-display').textContent=displayName;localStorage.setItem('annotator_username',displayName);}}catch(e){console.log('[ORBIT] SSO detection failed, using manual login');}})();
 function showLoginModal(){document.getElementById('login-modal').classList.add('show');document.getElementById('login-name').value=tool.userName||'';document.getElementById('login-name').focus();}
 function handleLogin(){const name=document.getElementById('login-name').value.trim();if(name){tool.userName=name;document.getElementById('login-modal').classList.remove('show');document.getElementById('user-name-display').textContent=name;localStorage.setItem('annotator_username',name);if(pendingFile){const file=pendingFile;pendingFile=null;elements.fileInput.value='';processFileAfterLogin(file);}return true;}showStatus('Please enter your name','warning');return false;}
 document.getElementById('login-submit').addEventListener('click',handleLogin);
@@ -215,9 +265,8 @@ createFeedbackForm();
 checkActiveSession();
 setInterval(function(){if(selectedMessageIdx!==null&&tool.conversations.length>0){updateConversationCounts();}},500);
 
-} // end initializeApp
+} // end runApp
 
-// Call initializeApp directly since @require already loaded XLSX
-initializeApp();
+bootApp();
 
 })();
